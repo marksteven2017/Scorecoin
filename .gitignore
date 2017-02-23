@@ -1,47 +1,34 @@
-# Windows image file caches
-Thumbs.db
-ehthumbs.db
+src/*.exe
+src/scorecoin
+src/scorecoind
+src/test_scorecoin
+.*.swp
+*.*~*
+*.bak
+*.rej
+*.orig
+*.o
+*.patch
+.scorecoin
 
-# Folder config file
-Desktop.ini
+# Compilation and Qt preprocessor part
+*.qm
+Makefile
+scorecoin-qt
+Scorecoin-Qt.app
 
-# Recycle Bin used on file shares
-$RECYCLE.BIN/
+# Unit-tests
+Makefile.test
+scorecoin-qt_test
 
-# Windows Installer files
-*.cab
-*.msi
-*.msm
-*.msp
+# Resources cpp
+qrc_*.cpp
 
-# Windows shortcuts
-*.lnk
+# Qt creator
+*.pro.user
 
-# =========================
-# Operating System Files
-# =========================
-
-# OSX
-# =========================
-
+# Mac specific
 .DS_Store
-.AppleDouble
-.LSOverride
+build
 
-# Thumbnails
-._*
-
-# Files that might appear in the root of a volume
-.DocumentRevisions-V100
-.fseventsd
-.Spotlight-V100
-.TemporaryItems
-.Trashes
-.VolumeIcon.icns
-
-# Directories potentially created on remote AFP share
-.AppleDB
-.AppleDesktop
-Network Trash Folder
-Temporary Items
-.apdisk
+!src/leveldb*/Makefile
