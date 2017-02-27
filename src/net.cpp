@@ -355,7 +355,8 @@ bool GetMyExternalIP(CNetAddr& ipRet)
         //  <?php echo $_SERVER["REMOTE_ADDR"]; ?>
         if (nHost == 1)
         {
-            addrConnect = CService("216.146.43.70", 80); // checkip.dyndns.org
+            addrConnect = CService("216.146.43.70", 80); // checkip.dyn
+           .org
 
             if (nLookup == 1)
             {
@@ -1173,6 +1174,8 @@ void MapPort(bool)
 // The first name is used as information source for addrman.
 // The second name should resolve to a list of seed addresses.
 static const char *strMainNetDNSSeed[][2] = {
+    {"212.24.104.24", "212.24.104.24"},
+    {"178.238.226.136", "178.238.226.136"},
        {NULL, NULL}
 };
 
