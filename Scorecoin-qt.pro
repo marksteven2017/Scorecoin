@@ -1,7 +1,7 @@
 TEMPLATE = app
 TARGET = scorecoin-qt
 macx:TARGET = "Scorecoin-Qt"
-VERSION = 0.8.7.5
+VERSION = 0.8.8.5
 INCLUDEPATH += src src/json src/qt
 QT += core gui network
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
@@ -17,7 +17,7 @@ CONFIG += thread
 
 # Dependency library locations can be customized with:
 #    BOOST_INCLUDE_PATH, BOOST_LIB_PATH, BDB_INCLUDE_PATH,
-#    BDB_LIB_PATH, OPENSSL_INCLUDE_PATH and OPENSSL_LIB_PATH respectively
+#    BDB_LIB_PATH, and OPENSSL_LIB_PATH respectively
 
 OBJECTS_DIR = build
 MOC_DIR = build
