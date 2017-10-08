@@ -9,6 +9,8 @@
 #include "addrman.h"
 #include "ui_interface.h"
 #include "script.h"
+#include "darksend.h"
+#include "wallet.h"
 
 #ifdef WIN32
 #include <string.h>
@@ -68,6 +70,9 @@ CCriticalSection cs_setservAddNodeAddresses;
 
 vector<std::string> vAddedNodes;
 CCriticalSection cs_vAddedNodes;
+
+NodeId nLastNodeId = 0;
+CCriticalSection cs_nLastNodeId;
 
 static CSemaphore *semOutbound = NULL;
 
@@ -435,62 +440,65 @@ CNode* FindNode(const CService& addr)
     return NULL;
 }
 
-CNode* ConnectNode(CAddress addrConnect, const char *pszDest)
+
+CNode* ConnectNode(CAddress addrConnect, const char *pszDest, bool darkSendMaster)
 {
-    if (pszDest == NULL) {
-        if (IsLocal(addrConnect))
-            return NULL;
+	if (pszDest == NULL) {
+		if (IsLocal(addrConnect))
+			return NULL;
 
-        // Look for an existing connection
-        CNode* pnode = FindNode((CService)addrConnect);
-        if (pnode)
-        {
-            pnode->AddRef();
-            return pnode;
-        }
-    }
+		// Look for an existing connection
+		CNode* pnode = FindNode((CService)addrConnect);
+		if (pnode)
+		{
+			if (darkSendMaster)
+				pnode->fDarkSendMaster = true;
+			pnode->AddRef();
+			return pnode;
+		}
+	}
 
 
-    /// debug print
-    printf("trying connection %s lastseen=%.1fhrs\n",
-        pszDest ? pszDest : addrConnect.ToString().c_str(),
-        pszDest ? 0 : (double)(GetAdjustedTime() - addrConnect.nTime)/3600.0);
+	/// debug print
+	printf("trying connection %s lastseen=%.1fhrs\n",
+		pszDest ? pszDest : addrConnect.ToString().c_str(),
+		pszDest ? 0 : (double)(GetAdjustedTime() - addrConnect.nTime) / 3600.0);
 
-    // Connect
-    SOCKET hSocket;
-    if (pszDest ? ConnectSocketByName(addrConnect, hSocket, pszDest, GetDefaultPort()) : ConnectSocket(addrConnect, hSocket))
-    {
-        addrman.Attempt(addrConnect);
+	// Connect
+	SOCKET hSocket;
+	if (pszDest ? ConnectSocketByName(addrConnect, hSocket, pszDest, GetDefaultPort()) : ConnectSocket(addrConnect, hSocket))
+	{
+		addrman.Attempt(addrConnect);
 
-        /// debug print
-        printf("connected %s\n", pszDest ? pszDest : addrConnect.ToString().c_str());
+		/// debug print
+		printf("connected %s\n", pszDest ? pszDest : addrConnect.ToString().c_str());
 
-        // Set to non-blocking
+		// Set to non-blocking
 #ifdef WIN32
-        u_long nOne = 1;
-        if (ioctlsocket(hSocket, FIONBIO, &nOne) == SOCKET_ERROR)
-            printf("ConnectSocket() : ioctlsocket non-blocking setting failed, error %d\n", WSAGetLastError());
+		u_long nOne = 1;
+		if (ioctlsocket(hSocket, FIONBIO, &nOne) == SOCKET_ERROR)
+			printf("ConnectSocket() : ioctlsocket non-blocking setting failed, error %d\n", WSAGetLastError());
 #else
-        if (fcntl(hSocket, F_SETFL, O_NONBLOCK) == SOCKET_ERROR)
-            printf("ConnectSocket() : fcntl non-blocking setting failed, error %d\n", errno);
+		if (fcntl(hSocket, F_SETFL, O_NONBLOCK) == SOCKET_ERROR)
+			printf("ConnectSocket() : fcntl non-blocking setting failed, error %d\n", errno);
 #endif
 
-        // Add node
-        CNode* pnode = new CNode(hSocket, addrConnect, pszDest ? pszDest : "", false);
-        pnode->AddRef();
+		// Add node
+		CNode* pnode = new CNode(hSocket, addrConnect, pszDest ? pszDest : "", false);
+		pnode->AddRef();
 
-        {
-            LOCK(cs_vNodes);
-            vNodes.push_back(pnode);
-        }
+		{
+			LOCK(cs_vNodes);
+			vNodes.push_back(pnode);
+		}
 
-        pnode->nTimeConnected = GetTime();
-        return pnode;
-    }
-    else
-    {
-        return NULL;
-    }
+		pnode->nTimeConnected = GetTime();
+		return pnode;
+	}
+	else
+	{
+		return NULL;
+	}
 }
 
 void CNode::CloseSocketDisconnect()
@@ -1213,17 +1221,7 @@ void ThreadDNSAddressSeed()
 
 
 
-
-
-
-
-
-
-
-
-
-unsigned int pnSeed[] =
-{};
+unsigned int pnSeed[] ={};
 
 void DumpAddresses()
 {
@@ -1833,9 +1831,6 @@ instance_of_cnetcleanup;
 
 
 
-
-
-
 void RelayTransaction(const CTransaction& tx, const uint256& hash)
 {
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
@@ -1873,4 +1868,100 @@ void RelayTransaction(const CTransaction& tx, const uint256& hash, const CDataSt
         } else
             pnode->PushInventory(inv);
     }
+}
+
+void RelayTransactionLockReq(const CTransaction& tx, const uint256& hash, bool relayToAll)
+{
+	CInv inv(MSG_TXLOCK_REQUEST, tx.GetHash());
+
+	//broadcast the new lock
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		if (!relayToAll && !pnode->fRelayTxes)
+			continue;
+
+		pnode->PushMessage("txlreq", tx);
+	}
+
+}
+
+void RelayDarkSendFinalTransaction(const int sessionID, const CTransaction& txNew)
+{
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		pnode->PushMessage("dsf", sessionID, txNew);
+	}
+}
+
+void RelayDarkSendIn(const std::vector<CTxIn>& in, const int64_t& nAmount, const CTransaction& txCollateral, const std::vector<CTxOut>& out)
+{
+	LOCK(cs_vNodes);
+
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		if ((CNetAddr)darkSendPool.submittedToMasternode != (CNetAddr)pnode->addr) continue;
+		printf("RelayDarkSendIn - found master, relaying message - %s \n", pnode->addr.ToString().c_str());
+		pnode->PushMessage("dsi", in, nAmount, txCollateral, out);
+	}
+}
+
+void RelayDarkSendStatus(const int sessionID, const int newState, const int newEntriesCount, const int newAccepted, const std::string error)
+{
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		pnode->PushMessage("dssu", sessionID, newState, newEntriesCount, newAccepted, error);
+	}
+}
+
+void RelayDarkSendElectionEntry(const CTxIn vin, const CService addr, const std::vector<unsigned char> vchSig, const int64_t nNow, const CPubKey pubkey, const CPubKey pubkey2, const int count, const int current, const int64_t lastUpdated, const int protocolVersion)
+{
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		if (!pnode->fRelayTxes) continue;
+
+
+		pnode->PushMessage("dsee", vin, addr, vchSig, nNow, pubkey, pubkey2, count, current, lastUpdated, protocolVersion);
+	}
+}
+
+void SendDarkSendElectionEntry(const CTxIn vin, const CService addr, const std::vector<unsigned char> vchSig, const int64_t nNow, const CPubKey pubkey, const CPubKey pubkey2, const int count, const int current, const int64_t lastUpdated, const int protocolVersion)
+{
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		pnode->PushMessage("dsee", vin, addr, vchSig, nNow, pubkey, pubkey2, count, current, lastUpdated, protocolVersion);
+	}
+}
+
+void RelayDarkSendElectionEntryPing(const CTxIn vin, const std::vector<unsigned char> vchSig, const int64_t nNow, const bool stop)
+{
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		if (!pnode->fRelayTxes) continue;
+
+		pnode->PushMessage("dseep", vin, vchSig, nNow, stop);
+	}
+}
+
+void SendDarkSendElectionEntryPing(const CTxIn vin, const std::vector<unsigned char> vchSig, const int64_t nNow, const bool stop)
+{
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		pnode->PushMessage("dseep", vin, vchSig, nNow, stop);
+	}
+}
+
+void RelayDarkSendCompletedTransaction(const int sessionID, const bool error, const std::string errorMessage)
+{
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pnode, vNodes)
+	{
+		pnode->PushMessage("dsc", sessionID, error, errorMessage);
+	}
 }

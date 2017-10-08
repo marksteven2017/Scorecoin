@@ -11,6 +11,10 @@
 #include "init.h"
 #include "ui_interface.h"
 #include "checkqueue.h"
+#include "darksend.h"
+#include "masternode.h"
+#include "spork.h"
+
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -420,6 +424,24 @@ bool CTransaction::IsStandard(string& strReason) const
     return true;
 }
 
+bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
+{
+	AssertLockHeld(cs_main);
+	// Time based nLockTime implemented in 0.1.6
+	if (tx.nLockTime == 0)
+		return true;
+	if (nBlockHeight == 0)
+		nBlockHeight = nBestHeight;
+	if (nBlockTime == 0)
+		nBlockTime = GetAdjustedTime();
+	if ((int64_t)tx.nLockTime < ((int64_t)tx.nLockTime < LOCKTIME_THRESHOLD ? (int64_t)nBlockHeight : nBlockTime))
+		return true;
+	BOOST_FOREACH(const CTxIn& txin, tx.vin)
+		if (!txin.IsFinal())
+			return false;
+	return true;
+}
+
 //
 // Check transaction inputs, and make sure any
 // pay-to-script-hash transactions are evaluating IsStandard scripts
@@ -640,6 +662,27 @@ int64 CTransaction::GetMinFee(unsigned int nBlockSize, bool fAllowFree,
     if (!MoneyRange(nMinFee))
         nMinFee = MAX_MONEY;
     return nMinFee;
+}
+
+int64_t GetMinFee(const CTransaction& tx, unsigned int nBlockSize, enum GetMinFee_mode mode, unsigned int nBytes)
+{
+	// Base fee is either MIN_TX_FEE or MIN_RELAY_TX_FEE
+	int64_t nBaseFee = (mode == GMF_RELAY) ? MIN_RELAY_TX_FEE : MIN_TX_FEE;
+
+	unsigned int nNewBlockSize = nBlockSize + nBytes;
+	int64_t nMinFee = (1 + (int64_t)nBytes / 1000) * nBaseFee;
+
+	// Raise the price as the block approaches full
+	if (nBlockSize != 1 && nNewBlockSize >= MAX_BLOCK_SIZE_GEN / 2)
+	{
+		if (nNewBlockSize >= MAX_BLOCK_SIZE_GEN)
+			return MAX_MONEY;
+		nMinFee *= MAX_BLOCK_SIZE_GEN / (MAX_BLOCK_SIZE_GEN - nNewBlockSize);
+	}
+
+	if (!MoneyRange(nMinFee))
+		nMinFee = MAX_MONEY;
+	return nMinFee;
 }
 
 void CTxMemPool::pruneSpent(const uint256 &hashTx, CCoins &coins)
@@ -976,6 +1019,24 @@ bool CWalletTx::AcceptWalletTransaction(bool fCheckInputs)
     return false;
 }
 
+int GetInputAge(CTxIn& vin)
+{
+	const uint256& prevHash = vin.prevout.hash;
+	CTransaction tx;
+	uint256 hashBlock;
+	bool fFound = GetTransaction(prevHash, tx, hashBlock);
+	if (fFound)
+	{
+		if (mapBlockIndex.find(hashBlock) != mapBlockIndex.end())
+		{
+			return pindexBest->nHeight - mapBlockIndex[hashBlock]->nHeight;
+		}
+		else
+			return 0;
+	}
+	else
+		return 0;
+}
 
 // Return transaction in tx, and if it was found inside a block, its hash is placed in hashBlock
 bool GetTransaction(const uint256 &hash, CTransaction &txOut, uint256 &hashBlock, bool fAllowSlow)
@@ -1309,6 +1370,31 @@ bool IsInitialBlockDownload()
     }
     return (GetTime() - nLastUpdate < 10 &&
             pindexBest->GetBlockTime() < GetTime() - 24 * 60 * 60);
+}
+
+void Misbehaving(NodeId pnode, int howmuch)
+{
+	if (howmuch == 0)
+		return;
+
+	LOCK(cs_vNodes);
+	BOOST_FOREACH(CNode* pn, vNodes)
+	{
+		if (pn->GetId() == pnode)
+		{
+			pn->nMisbehavior += howmuch;
+			int banscore = GetArg("-banscore", 100);
+			if (pn->nMisbehavior >= banscore && pn->nMisbehavior - howmuch < banscore)
+			{
+				printf("Misbehaving: %s (%d -> %d) BAN THRESHOLD EXCEEDED\n", pn->addrName, pn->nMisbehavior - howmuch, pn->nMisbehavior);
+				//pn->fShouldBan = true;
+			}
+			else
+				printf("Misbehaving: %s (%d -> %d)\n", pn->addrName, pn->nMisbehavior - howmuch, pn->nMisbehavior);
+
+			break;
+		}
+	}
 }
 
 void static InvalidChainFound(CBlockIndex* pindexNew)
@@ -2215,6 +2301,80 @@ bool CBlock::CheckBlock(CValidationState &state, bool fCheckPOW, bool fCheckMerk
     for (unsigned int i = 1; i < vtx.size(); i++)
         if (vtx[i].IsCoinBase())
             return state.DoS(100, error("CheckBlock() : more than one coinbase"));
+
+
+	// ----------- masternode payments -----------
+
+	bool MasternodePayments = false;
+
+	if (nTime > START_MASTERNODE_PAYMENTS) MasternodePayments = true;
+
+	if (!IsSporkActive(SPORK_1_MASTERNODE_PAYMENTS_ENFORCEMENT)) {
+		MasternodePayments = false;
+		if (fDebug) printf("CheckBlock() : Masternode payment enforcement is off\n");
+	}
+
+	if (MasternodePayments)
+	{
+		LOCK2(cs_main, mempool.cs);
+
+		CBlockIndex *pindex = pindexBest;
+		if (pindex != NULL) {
+			if (pindex->GetBlockHash() == hashPrevBlock) {
+				CAmount masternodePaymentAmount = GetMasternodePayment(pindex->nHeight + 1, vtx[0].GetValueOut());
+				bool fIsInitialDownload = IsInitialBlockDownload();
+
+				// If we don't already have its previous block, skip masternode payment step
+				if (!fIsInitialDownload && pindex != NULL)
+				{
+					bool foundPaymentAmount = false;
+					bool foundPayee = false;
+					bool foundPaymentAndPayee = false;
+
+					CScript payee;
+					if (!masternodePayments.GetBlockPayee(pindexBest->nHeight + 1, payee) || payee == CScript()) {
+						foundPayee = true; //doesn't require a specific payee
+						foundPaymentAmount = true;
+						foundPaymentAndPayee = true;
+						if (fDebug) { printf("CheckBlock() : Using non-specific masternode payments %d\n", pindexBest->nHeight + 1); }
+					}
+
+					for (unsigned int i = 0; i < vtx[0].vout.size(); i++) {
+						if (vtx[0].vout[i].nValue == masternodePaymentAmount)
+							foundPaymentAmount = true;
+						if (vtx[0].vout[i].scriptPubKey == payee)
+							foundPayee = true;
+						if (vtx[0].vout[i].nValue == masternodePaymentAmount && vtx[0].vout[i].scriptPubKey == payee)
+							foundPaymentAndPayee = true;
+					}
+
+					if (!foundPaymentAndPayee) {
+						CTxDestination address1;
+						ExtractDestination(payee, address1);
+						CBitcoinAddress address2(address1);
+
+						if (fDebug) { printf("CheckBlock() : Couldn't find masternode payment(%d|%d) or payee(%d|%s) nHeight %d. \n", foundPaymentAmount, masternodePaymentAmount, foundPayee, address2.ToString().c_str(), pindexBest->nHeight + 1); }
+						return state.DoS(100, error("CheckBlock() : Couldn't find masternode payment or payee"));
+					}
+					else {
+						if (fDebug) { printf("CheckBlock() : Found masternode payment %d\n", pindexBest->nHeight + 1); }
+					}
+				}
+				else {
+					if (fDebug) { printf("CheckBlock() : Is initial download, skipping masternode payment check %d\n", pindexBest->nHeight + 1); }
+				}
+			}
+			else {
+				if (fDebug) { printf("CheckBlock() : Skipping masternode payment check - nHeight %d Hash %s\n", pindexBest->nHeight + 1, GetHash().ToString().c_str()); }
+			}
+		}
+		else {
+			if (fDebug) { printf("CheckBlock() : pindex is null, skipping masternode payment check\n"); }
+		}
+	}
+	else {
+		if (fDebug) { printf("CheckBlock() : skipping masternode payment checks\n"); }
+	}
 
     // Check transactions
     BOOST_FOREACH(const CTransaction& tx, vtx)
@@ -3178,6 +3338,10 @@ bool static AlreadyHave(const CInv& inv)
     case MSG_BLOCK:
         return mapBlockIndex.count(inv.hash) ||
                mapOrphanBlocks.count(inv.hash);
+	case MSG_SPORK:
+		return mapSporks.count(inv.hash);
+	case MSG_MASTERNODE_WINNER:
+		return mapSeenMasternodeVotes.count(inv.hash);
     }
     // Don't know what it is, just say we already got one
     return true;
@@ -3289,7 +3453,21 @@ void static ProcessGetData(CNode* pfrom)
                         pushed = true;
                     }
                 }
-                if (!pushed && inv.type == MSG_TX) {
+
+				if (!pushed && inv.type == MSG_TX) {
+					if (mapDarksendBroadcastTxes.count(inv.hash)) {
+					CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+					ss.reserve(1000);
+					ss <<
+						mapDarksendBroadcastTxes[inv.hash].tx <<
+						mapDarksendBroadcastTxes[inv.hash].vin <<
+						mapDarksendBroadcastTxes[inv.hash].vchSig <<
+						mapDarksendBroadcastTxes[inv.hash].sigTime;
+
+					pfrom->PushMessage("dstx", ss);
+					pushed = true;
+				}
+				else {
                     LOCK(mempool.cs);
                     if (mempool.exists(inv.hash)) {
                         CTransaction tx = mempool.lookup(inv.hash);
@@ -3300,6 +3478,27 @@ void static ProcessGetData(CNode* pfrom)
                         pushed = true;
                     }
                 }
+			}
+				if (!pushed && inv.type == MSG_SPORK) {
+					if (mapSporks.count(inv.hash)) {
+						CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+						ss.reserve(1000);
+						ss << mapSporks[inv.hash];
+						pfrom->PushMessage("spork", ss);
+						pushed = true;
+					}
+				}
+				if (!pushed && inv.type == MSG_MASTERNODE_WINNER) {
+					if (mapSeenMasternodeVotes.count(inv.hash)) {
+						CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+						int a = 0;
+						ss.reserve(1000);
+						ss << mapSeenMasternodeVotes[inv.hash] << a;
+						pfrom->PushMessage("mnw", ss);
+						pushed = true;
+					}
+				}
+
                 if (!pushed) {
                     vNotFound.push_back(inv);
                 }
@@ -3856,8 +4055,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
             }
         }
     }
-
-
     else if (!fBloomFilters &&
              (strCommand == "filterload" ||
               strCommand == "filteradd" ||
@@ -3918,9 +4115,12 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
 
     else
     {
-        // Ignore unknown commands for extensibility
+		ProcessMessageDarksend(pfrom, strCommand, vRecv);
+		ProcessMessageMasternode(pfrom, strCommand, vRecv);
+		//ProcessMessageInstantX(pfrom, strCommand, vRecv);
+		ProcessSpork(pfrom, strCommand, vRecv);
+		// Ignore unknown commands for extensibility
     }
-
 
     // Update the last seen time for this node's address
     if (pfrom->fNetworkNode)
@@ -4886,6 +5086,14 @@ uint64 CTxOutCompressor::DecompressAmount(uint64 x)
         e--;
     }
     return n;
+}
+
+
+int64_t GetMasternodePayment(int nHeight, int64_t blockValue)
+{
+	int64_t ret = static_cast<int64_t>(blockValue * 0.733333333333333333); //67%
+
+	return ret;
 }
 
 

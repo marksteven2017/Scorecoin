@@ -9,6 +9,15 @@
 #include <string>
 #include <list>
 #include <map>
+#include <boost/iostreams/concepts.hpp>
+#include <boost/iostreams/stream.hpp>
+#include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
+
+int ReadHTTPStatus(std::basic_istream<char>& stream, int &proto);
+int ReadHTTPMessage(std::basic_istream<char>& stream, std::map<std::string,
+	std::string>& mapHeadersRet, std::string& strMessageRet,
+	int nProto, size_t max_size);
 
 class CBlockIndex;
 class CReserveKey;
@@ -206,5 +215,10 @@ extern json_spirit::Value getblock(const json_spirit::Array& params, bool fHelp)
 extern json_spirit::Value gettxoutsetinfo(const json_spirit::Array& params, bool fHelp);
 extern json_spirit::Value gettxout(const json_spirit::Array& params, bool fHelp);
 extern json_spirit::Value verifychain(const json_spirit::Array& params, bool fHelp);
+
+extern json_spirit::Value keepass(const json_spirit::Array& params, bool fHelp);
+extern json_spirit::Value darksend(const json_spirit::Array& params, bool fHelp);
+//extern json_spirit::Value spork(const json_spirit::Array& params, bool fHelp);
+extern json_spirit::Value masternode(const json_spirit::Array& params, bool fHelp);
 
 #endif

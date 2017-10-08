@@ -167,6 +167,7 @@ public:
         BN_mpi2bn(pch, p - pch, this);
     }
 
+
     void setuint64(uint64 n)
     {
         unsigned char pch[sizeof(n) + 6];
@@ -193,6 +194,21 @@ public:
         pch[3] = (nSize) & 0xff;
         BN_mpi2bn(pch, p - pch, this);
     }
+
+	uint64_t getuint64()
+	{
+		unsigned int nSize = BN_bn2mpi(this, NULL);
+		if (nSize < 4)
+			return 0;
+		std::vector<unsigned char> vch(nSize);
+		BN_bn2mpi(this, &vch[0]);
+		if (vch.size() > 4)
+			vch[4] &= 0x7f;
+		uint64_t n = 0;
+		for (unsigned int i = 0, j = vch.size() - 1; i < sizeof(n) && j >= 4; i++, j--)
+			((unsigned char*)&n)[i] = vch[j];
+		return n;
+	}
 
     void setuint256(uint256 n)
     {

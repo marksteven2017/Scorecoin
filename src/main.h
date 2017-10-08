@@ -5,6 +5,7 @@
 #ifndef BITCOIN_MAIN_H
 #define BITCOIN_MAIN_H
 
+#include "util.h"
 #include "bignum.h"
 #include "sync.h"
 #include "net.h"
@@ -22,8 +23,34 @@ class CReserveKey;
 class CAddress;
 class CInv;
 class CNode;
+class CTxIn;
 
 struct CBlockIndexWorkComparator;
+
+#define START_MASTERNODE_PAYMENTS_TESTNET 1507400209
+#define START_MASTERNODE_PAYMENTS 1507400209
+
+static const int64_t DARKSEND_COLLATERAL = (25000 * COIN);
+static const int64_t DARKSEND_FEE = (0.0001*COIN);
+static const int64_t DARKSEND_POOL_MAX = (250000.99*COIN);
+
+
+#define MASTERNODE_NOT_PROCESSED               0 // initial state
+#define MASTERNODE_IS_CAPABLE                  1
+#define MASTERNODE_NOT_CAPABLE                 2
+#define MASTERNODE_STOPPED                     3
+#define MASTERNODE_INPUT_TOO_NEW               4
+#define MASTERNODE_PORT_NOT_OPEN               6
+#define MASTERNODE_PORT_OPEN                   7
+#define MASTERNODE_SYNC_IN_PROCESS             8
+#define MASTERNODE_REMOTELY_ENABLED            9
+
+#define MASTERNODE_MIN_CONFIRMATIONS           15
+#define MASTERNODE_MIN_DSEEP_SECONDS           (30*60)
+#define MASTERNODE_MIN_DSEE_SECONDS            (5*60)
+#define MASTERNODE_PING_SECONDS                (1*60)
+#define MASTERNODE_EXPIRATION_SECONDS          (65*60)
+#define MASTERNODE_REMOVAL_SECONDS             (70*60)
 
 /** The maximum allowed size for a serialized block, in bytes (network rule) */
 static const unsigned int MAX_BLOCK_SIZE = 1000000;                      // 1000KB block hard limit
@@ -60,6 +87,12 @@ static const int COINBASE_MATURITY = 20;
 static const unsigned int LOCKTIME_THRESHOLD = 500000000; // Tue Nov  5 00:53:20 1985 UTC
 /** Maximum number of script-checking threads allowed */
 static const int MAX_SCRIPTCHECK_THREADS = 16;
+
+/** Fees smaller than this (in satoshi) are considered zero fee (for transaction creation) */
+static const int64_t MIN_TX_FEE = 10000;
+/** Fees smaller than this (in satoshi) are considered zero fee (for relaying) */
+static const int64_t MIN_RELAY_TX_FEE = MIN_TX_FEE;
+
 #ifdef USE_UPNP
 static const int fHaveUPnP = true;
 #else
@@ -104,6 +137,9 @@ extern unsigned int nCoinCacheSize;
 // Settings
 extern int64 nTransactionFee;
 extern int64 nMinimumInputValue;
+
+extern bool fMinimizeCoinAge;
+
 
 // Minimum disk space required - used in CheckDiskSpace()
 static const uint64 nMinDiskSpace = 52428800;
@@ -189,15 +225,11 @@ CBlockIndex * InsertBlockIndex(uint256 hash);
 bool VerifySignature(const CCoins& txFrom, const CTransaction& txTo, unsigned int nIn, unsigned int flags, int nHashType);
 /** Abort with a message */
 bool AbortNode(const std::string &msg);
+int GetInputAge(CTxIn& vin);
+/** Increase a node's misbehavior score. */
+void Misbehaving(NodeId nodeid, int howmuch);
 
-
-
-
-
-
-
-
-
+int64_t GetMasternodePayment(int nHeight, int64_t blockValue);
 
 
 bool GetWalletFile(CWallet* pwallet, std::string &strWalletFileOut);
@@ -242,6 +274,7 @@ struct CDiskTxPos : public CDiskBlockPos
         READWRITE(VARINT(nTxOffset));
     )
 
+
     CDiskTxPos(const CDiskBlockPos &blockIn, unsigned int nTxOffsetIn) : CDiskBlockPos(blockIn.nFile, blockIn.nPos), nTxOffset(nTxOffsetIn) {
     }
 
@@ -255,216 +288,214 @@ struct CDiskTxPos : public CDiskBlockPos
     }
 };
 
-
-/** An inpoint - a combination of a transaction and an index n into its vin */
-class CInPoint
-{
-public:
-    CTransaction* ptx;
-    unsigned int n;
-
-    CInPoint() { SetNull(); }
-    CInPoint(CTransaction* ptxIn, unsigned int nIn) { ptx = ptxIn; n = nIn; }
-    void SetNull() { ptx = NULL; n = (unsigned int) -1; }
-    bool IsNull() const { return (ptx == NULL && n == (unsigned int) -1); }
-};
-
-
-
-/** An outpoint - a combination of a transaction hash and an index n into its vout */
-class COutPoint
-{
-public:
-    uint256 hash;
-    unsigned int n;
-
-    COutPoint() { SetNull(); }
-    COutPoint(uint256 hashIn, unsigned int nIn) { hash = hashIn; n = nIn; }
-    IMPLEMENT_SERIALIZE( READWRITE(FLATDATA(*this)); )
-    void SetNull() { hash = 0; n = (unsigned int) -1; }
-    bool IsNull() const { return (hash == 0 && n == (unsigned int) -1); }
-
-    friend bool operator<(const COutPoint& a, const COutPoint& b)
-    {
-        return (a.hash < b.hash || (a.hash == b.hash && a.n < b.n));
-    }
-
-    friend bool operator==(const COutPoint& a, const COutPoint& b)
-    {
-        return (a.hash == b.hash && a.n == b.n);
-    }
-
-    friend bool operator!=(const COutPoint& a, const COutPoint& b)
-    {
-        return !(a == b);
-    }
-
-    std::string ToString() const
-    {
-        return strprintf("COutPoint(%s, %u)", hash.ToString().c_str(), n);
-    }
-
-    void print() const
-    {
-        printf("%s\n", ToString().c_str());
-    }
-};
-
-
-
-
-/** An input of a transaction.  It contains the location of the previous
- * transaction's output that it claims and a signature that matches the
- * output's public key.
- */
-class CTxIn
-{
-public:
-    COutPoint prevout;
-    CScript scriptSig;
-    unsigned int nSequence;
-
-    CTxIn()
-    {
-        nSequence = std::numeric_limits<unsigned int>::max();
-    }
-
-    explicit CTxIn(COutPoint prevoutIn, CScript scriptSigIn=CScript(), unsigned int nSequenceIn=std::numeric_limits<unsigned int>::max())
-    {
-        prevout = prevoutIn;
-        scriptSig = scriptSigIn;
-        nSequence = nSequenceIn;
-    }
-
-    CTxIn(uint256 hashPrevTx, unsigned int nOut, CScript scriptSigIn=CScript(), unsigned int nSequenceIn=std::numeric_limits<unsigned int>::max())
-    {
-        prevout = COutPoint(hashPrevTx, nOut);
-        scriptSig = scriptSigIn;
-        nSequence = nSequenceIn;
-    }
-
-    IMPLEMENT_SERIALIZE
-    (
-        READWRITE(prevout);
-        READWRITE(scriptSig);
-        READWRITE(nSequence);
-    )
-
-    bool IsFinal() const
-    {
-        return (nSequence == std::numeric_limits<unsigned int>::max());
-    }
-
-    friend bool operator==(const CTxIn& a, const CTxIn& b)
-    {
-        return (a.prevout   == b.prevout &&
-                a.scriptSig == b.scriptSig &&
-                a.nSequence == b.nSequence);
-    }
-
-    friend bool operator!=(const CTxIn& a, const CTxIn& b)
-    {
-        return !(a == b);
-    }
-
-    std::string ToString() const
-    {
-        std::string str;
-        str += "CTxIn(";
-        str += prevout.ToString();
-        if (prevout.IsNull())
-            str += strprintf(", coinbase %s", HexStr(scriptSig).c_str());
-        else
-            str += strprintf(", scriptSig=%s", scriptSig.ToString().substr(0,24).c_str());
-        if (nSequence != std::numeric_limits<unsigned int>::max())
-            str += strprintf(", nSequence=%u", nSequence);
-        str += ")";
-        return str;
-    }
-
-    void print() const
-    {
-        printf("%s\n", ToString().c_str());
-    }
-};
-
-
-
-
-/** An output of a transaction.  It contains the public key that the next input
- * must be able to sign with to claim it.
- */
-class CTxOut
-{
-public:
-    int64 nValue;
-    CScript scriptPubKey;
-
-    CTxOut()
-    {
-        SetNull();
-    }
-
-    CTxOut(int64 nValueIn, CScript scriptPubKeyIn)
-    {
-        nValue = nValueIn;
-        scriptPubKey = scriptPubKeyIn;
-    }
-
-    IMPLEMENT_SERIALIZE
-    (
-        READWRITE(nValue);
-        READWRITE(scriptPubKey);
-    )
-
-    void SetNull()
-    {
-        nValue = -1;
-        scriptPubKey.clear();
-    }
-
-    bool IsNull() const
-    {
-        return (nValue == -1);
-    }
-
-    uint256 GetHash() const
-    {
-        return SerializeHash(*this);
-    }
-
-    friend bool operator==(const CTxOut& a, const CTxOut& b)
-    {
-        return (a.nValue       == b.nValue &&
-                a.scriptPubKey == b.scriptPubKey);
-    }
-
-    friend bool operator!=(const CTxOut& a, const CTxOut& b)
-    {
-        return !(a == b);
-    }
-
-    bool IsDust() const;
-
-    std::string ToString() const
-    {
-        return strprintf("CTxOut(nValue=%"PRI64d".%08"PRI64d", scriptPubKey=%s)", nValue / COIN, nValue % COIN, scriptPubKey.ToString().substr(0,30).c_str());
-    }
-
-    void print() const
-    {
-        printf("%s\n", ToString().c_str());
-    }
-};
-
-
-
 enum GetMinFee_mode
 {
     GMF_BLOCK,
     GMF_RELAY,
     GMF_SEND,
 };
+
+int64_t GetMinFee(const CTransaction& tx, unsigned int nBlockSize = 1, enum GetMinFee_mode mode = GMF_BLOCK, unsigned int nBytes = 0);
+
+/** An outpoint - a combination of a transaction hash and an index n into its vout */
+class COutPoint
+{
+public:
+	uint256 hash;
+	unsigned int n;
+
+	COutPoint() { SetNull(); }
+	COutPoint(uint256 hashIn, unsigned int nIn) { hash = hashIn; n = nIn; }
+	IMPLEMENT_SERIALIZE(READWRITE(FLATDATA(*this)); )
+		void SetNull() { hash = 0; n = (unsigned int)-1; }
+	bool IsNull() const { return (hash == 0 && n == (unsigned int)-1); }
+
+	friend bool operator<(const COutPoint& a, const COutPoint& b)
+	{
+		return (a.hash < b.hash || (a.hash == b.hash && a.n < b.n));
+	}
+
+	friend bool operator==(const COutPoint& a, const COutPoint& b)
+	{
+		return (a.hash == b.hash && a.n == b.n);
+	}
+
+	friend bool operator!=(const COutPoint& a, const COutPoint& b)
+	{
+		return !(a == b);
+	}
+
+	std::string ToString() const
+	{
+		return strprintf("COutPoint(%s, %u)", hash.ToString().c_str(), n);
+	}
+
+	void print() const
+	{
+		printf("%s\n", ToString().c_str());
+	}
+};
+
+
+/** An inpoint - a combination of a transaction and an index n into its vin */
+class CInPoint
+{
+public:
+	CTransaction* ptx;
+	unsigned int n;
+
+	CInPoint() { SetNull(); }
+	CInPoint(CTransaction* ptxIn, unsigned int nIn) { ptx = ptxIn; n = nIn; }
+	void SetNull() { ptx = NULL; n = (unsigned int)-1; }
+	bool IsNull() const { return (ptx == NULL && n == (unsigned int)-1); }
+};
+
+
+/** An input of a transaction.  It contains the location of the previous
+* transaction's output that it claims and a signature that matches the
+* output's public key.
+*/
+class CTxIn
+{
+public:
+	COutPoint prevout;
+	CScript scriptSig;
+	CScript prevPubKey;
+	unsigned int nSequence;
+
+	CTxIn()
+	{
+		nSequence = std::numeric_limits<unsigned int>::max();
+	}
+
+	explicit CTxIn(COutPoint prevoutIn, CScript scriptSigIn = CScript(), unsigned int nSequenceIn = std::numeric_limits<unsigned int>::max())
+	{
+		prevout = prevoutIn;
+		scriptSig = scriptSigIn;
+		nSequence = nSequenceIn;
+	}
+
+	CTxIn(uint256 hashPrevTx, unsigned int nOut, CScript scriptSigIn = CScript(), unsigned int nSequenceIn = std::numeric_limits<unsigned int>::max())
+	{
+		prevout = COutPoint(hashPrevTx, nOut);
+		scriptSig = scriptSigIn;
+		nSequence = nSequenceIn;
+	}
+
+	IMPLEMENT_SERIALIZE
+	(
+		READWRITE(prevout);
+	READWRITE(scriptSig);
+	READWRITE(nSequence);
+	)
+
+		bool IsFinal() const
+	{
+		return (nSequence == std::numeric_limits<unsigned int>::max());
+	}
+
+	friend bool operator==(const CTxIn& a, const CTxIn& b)
+	{
+		return (a.prevout == b.prevout &&
+			a.scriptSig == b.scriptSig &&
+			a.nSequence == b.nSequence);
+	}
+
+	friend bool operator!=(const CTxIn& a, const CTxIn& b)
+	{
+		return !(a == b);
+	}
+
+	std::string ToString() const
+	{
+		std::string str;
+		str += "CTxIn(";
+		str += prevout.ToString();
+		if (prevout.IsNull())
+			str += strprintf(", coinbase %s", HexStr(scriptSig).c_str());
+		else
+			str += strprintf(", scriptSig=%s", scriptSig.ToString().substr(0, 24).c_str());
+		if (nSequence != std::numeric_limits<unsigned int>::max())
+			str += strprintf(", nSequence=%u", nSequence);
+		str += ")";
+		return str;
+	}
+
+	void print() const
+	{
+		printf("%s\n", ToString().c_str());
+	}
+};
+
+
+
+
+/** An output of a transaction.  It contains the public key that the next input
+* must be able to sign with to claim it.
+*/
+class CTxOut
+{
+public:
+	int64 nValue;
+	CScript scriptPubKey;
+
+	CTxOut()
+	{
+		SetNull();
+	}
+
+	CTxOut(int64 nValueIn, CScript scriptPubKeyIn)
+	{
+		nValue = nValueIn;
+		scriptPubKey = scriptPubKeyIn;
+	}
+
+	IMPLEMENT_SERIALIZE
+	(
+		READWRITE(nValue);
+	READWRITE(scriptPubKey);
+	)
+
+		void SetNull()
+	{
+		nValue = -1;
+		scriptPubKey.clear();
+	}
+
+	bool IsNull() const
+	{
+		return (nValue == -1);
+	}
+
+	uint256 GetHash() const
+	{
+		return SerializeHash(*this);
+	}
+
+	friend bool operator==(const CTxOut& a, const CTxOut& b)
+	{
+		return (a.nValue == b.nValue &&
+			a.scriptPubKey == b.scriptPubKey);
+	}
+
+	friend bool operator!=(const CTxOut& a, const CTxOut& b)
+	{
+		return !(a == b);
+	}
+
+	bool IsDust() const;
+
+	std::string ToString() const
+	{
+		return strprintf("CTxOut(nValue=%"PRI64d".%08"PRI64d", scriptPubKey=%s)", nValue / COIN, nValue % COIN, scriptPubKey.ToString().substr(0, 30).c_str());
+	}
+
+	void print() const
+	{
+		printf("%s\n", ToString().c_str());
+	}
+};
+
 
 /** The basic transaction that is broadcasted on the network and contained in
  * blocks. A transaction can contain multiple inputs and outputs.
@@ -475,6 +506,7 @@ public:
     static int64 nMinTxFee;
     static int64 nMinRelayTxFee;
     static const int CURRENT_VERSION=1;
+	unsigned int nTime;
     int nVersion;
     std::vector<CTxIn> vin;
     std::vector<CTxOut> vout;
@@ -497,6 +529,7 @@ public:
     void SetNull()
     {
         nVersion = CTransaction::CURRENT_VERSION;
+		nTime = GetAdjustedTime();
         vin.clear();
         vout.clear();
         nLockTime = 0;
@@ -630,7 +663,7 @@ public:
 // Apply the effects of this transaction on the UTXO set represented by view
 void UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCache &inputs, CTxUndo &txundo, int nHeight, const uint256 &txhash);
 
-    int64 GetMinFee(unsigned int nBlockSize=1, bool fAllowFree=true, enum GetMinFee_mode mode=GMF_BLOCK) const;
+
 
     friend bool operator==(const CTransaction& a, const CTransaction& b)
     {
@@ -680,6 +713,8 @@ void UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCach
 
     // Apply the effects of this transaction on the UTXO set represented by view
     void UpdateCoins(CValidationState &state, CCoinsViewCache &view, CTxUndo &txundo, int nHeight, const uint256 &txhash) const;
+
+	int64 GetMinFee(unsigned int nBlockSize = 1, bool fAllowFree = true, enum GetMinFee_mode mode = GMF_BLOCK) const;
 
     // Context-independent validity checks
     bool CheckTransaction(CValidationState &state) const;
@@ -1118,6 +1153,8 @@ public:
         std::swap(nHashType, check.nHashType);
     }
 };
+
+bool IsFinalTx(const CTransaction &tx, int nBlockHeight = 0, int64_t nBlockTime = 0);
 
 /** A transaction with a merkle branch linking it to the block chain. */
 class CMerkleTx : public CTransaction
@@ -2095,45 +2132,37 @@ public:
     }
 };
 
-
-
-
-
-
-
-
 class CTxMemPool
 {
 public:
-    mutable CCriticalSection cs;
-    std::map<uint256, CTransaction> mapTx;
-    std::map<COutPoint, CInPoint> mapNextTx;
+	mutable CCriticalSection cs;
+	std::map<uint256, CTransaction> mapTx;
+	std::map<COutPoint, CInPoint> mapNextTx;
 
-    bool accept(CValidationState &state, CTransaction &tx, bool fCheckInputs, bool fLimitFree, bool* pfMissingInputs, bool fRejectInsaneFee = false);
-    bool addUnchecked(const uint256& hash, const CTransaction &tx);
-    bool remove(const CTransaction &tx, bool fRecursive = false);
-    bool removeConflicts(const CTransaction &tx);
-    void clear();
-    void queryHashes(std::vector<uint256>& vtxid);
-    void pruneSpent(const uint256& hash, CCoins &coins);
+	bool accept(CValidationState &state, CTransaction &tx, bool fCheckInputs, bool fLimitFree, bool* pfMissingInputs, bool fRejectInsaneFee = false);
+	bool addUnchecked(const uint256& hash, const CTransaction &tx);
+	bool remove(const CTransaction &tx, bool fRecursive = false);
+	bool removeConflicts(const CTransaction &tx);
+	void clear();
+	void queryHashes(std::vector<uint256>& vtxid);
+	void pruneSpent(const uint256& hash, CCoins &coins);
 
-    unsigned long size()
-    {
-        LOCK(cs);
-        return mapTx.size();
-    }
+	unsigned long size()
+	{
+		LOCK(cs);
+		return mapTx.size();
+	}
 
-    bool exists(uint256 hash)
-    {
-        return (mapTx.count(hash) != 0);
-    }
+	bool exists(uint256 hash)
+	{
+		return (mapTx.count(hash) != 0);
+	}
 
-    CTransaction& lookup(uint256 hash)
-    {
-        return mapTx[hash];
-    }
+	CTransaction& lookup(uint256 hash)
+	{
+		return mapTx[hash];
+	}
 };
-
 extern CTxMemPool mempool;
 
 struct CCoinsStats

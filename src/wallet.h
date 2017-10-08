@@ -19,6 +19,8 @@
 #include "walletdb.h"
 
 extern bool bSpendZeroConfChange;
+extern bool fConfChange;
+
 
 class CAccountingEntry;
 class CWalletTx;
@@ -37,6 +39,13 @@ enum WalletFeature
     FEATURE_LATEST = 60000
 };
 
+enum AvailableCoinsType
+{
+	ALL_COINS = 1,
+	ONLY_DENOMINATED = 2,
+	ONLY_NONDENOMINATED = 3,
+	ONLY_NONDENOMINATED_NOTMN = 4 // ONLY_NONDENOMINATED and not 1000 Score at the same time
+};
 
 /** A key pool entry */
 class CKeyPool
@@ -83,6 +92,18 @@ private:
 
 public:
     mutable CCriticalSection cs_wallet;
+	bool SelectCoinsDark(int64_t nValueMin, int64_t nValueMax, std::vector<CTxIn>& setCoinsRet, int64_t& nValueRet, int nDarksendRoundsMin, int nDarksendRoundsMax) const;
+	bool SelectCoinsByDenominations(int nDenom, int64_t nValueMin, int64_t nValueMax, std::vector<CTxIn>& setCoinsRet, std::vector<COutput>& vCoins, int64_t& nValueRet, int nDarksendRoundsMin, int nDarksendRoundsMax);
+	bool SelectCoinsDarkDenominated(int64_t nTargetValue, std::vector<CTxIn>& setCoinsRet, int64_t& nValueRet) const;
+	bool SelectCoinsMasternode(CTxIn& vin, int64_t& nValueRet, CScript& pubScript) const;
+	bool HasCollateralInputs() const;
+	bool IsCollateralAmount(int64_t nInputAmount) const;
+	int  CountInputsWithAmount(int64_t nInputAmount);
+
+	bool SelectCoinsCollateral(std::vector<CTxIn>& setCoinsRet, int64_t& nValueRet) const;
+	bool SelectCoinsWithoutDenomination(int64_t nTargetValue, std::set<std::pair<const CWalletTx*, unsigned int> >& setCoinsRet, int64_t& nValueRet) const;
+
+
 
     bool fFileBacked;
     std::string strWalletFile;
@@ -128,12 +149,17 @@ public:
     bool CanSupportFeature(enum WalletFeature wf) { return nWalletMaxVersion >= wf; }
 
     void AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed=true, const CCoinControl *coinControl=NULL) const;
+	void AvailableCoinsDeno(std::vector<COutput>& vCoins, bool fOnlyConfirmed = true, const CCoinControl *coinControl = NULL, AvailableCoinsType coin_type = ALL_COINS, bool useIX = false) const;
+
     bool SelectCoinsMinConf(int64 nTargetValue, int nConfMine, int nConfTheirs, std::vector<COutput> vCoins, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, int64& nValueRet) const;
-    bool IsLockedCoin(uint256 hash, unsigned int n) const;
+	bool SelectCoinsMinConfByCoinAge(int64_t nTargetValue, unsigned int nSpendTime, int nConfMine, int nConfTheirs, std::vector<COutput> vCoins, std::set<std::pair<const CWalletTx*, unsigned int> >& setCoinsRet, int64_t& nValueRet) const;
+
+	bool IsLockedCoin(uint256 hash, unsigned int n) const;
     void LockCoin(COutPoint& output);
     void UnlockCoin(COutPoint& output);
     void UnlockAllCoins();
     void ListLockedCoins(std::vector<COutPoint>& vOutpts);
+	CAmount GetTotalValue(std::vector<CTxIn> vCoins);
 
     // keystore implementation
     // Generate a new key
@@ -178,15 +204,42 @@ public:
     int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false);
     void ReacceptWalletTransactions();
     void ResendWalletTransactions();
-    int64 GetBalance() const;
+	int64 GetBalance() const;
     int64 GetUnconfirmedBalance() const;
-    int64 GetImmatureBalance() const;
-    bool CreateTransaction(const std::vector<std::pair<CScript, int64> >& vecSend,
-                           CWalletTx& wtxNew, CReserveKey& reservekey, int64& nFeeRet, std::string& strFailReason, const CCoinControl *coinControl=NULL);
-    bool CreateTransaction(CScript scriptPubKey, int64 nValue,
-                           CWalletTx& wtxNew, CReserveKey& reservekey, int64& nFeeRet, std::string& strFailReason, const CCoinControl *coinControl=NULL);
-    bool CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey);
-    std::string SendMoney(CScript scriptPubKey, int64 nValue, CWalletTx& wtxNew, bool fAskFee=false);
+	int64 GetImmatureBalance() const;
+
+	CAmount GetAnonymizedBalance() const;
+	double GetAverageAnonymizedRounds() const;
+	CAmount GetNormalizedAnonymizedBalance() const;
+	CAmount GetDenominatedBalance(bool onlyDenom = true, bool onlyUnconfirmed = false) const;
+
+
+
+	//S
+	bool CreateTransaction(const std::vector<std::pair<CScript, int64> >& vecSend,
+		CWalletTx& wtxNew, CReserveKey& reservekey, int64& nFeeRet, std::string& strFailReason, const CCoinControl *coinControl = NULL);
+
+	bool CreateTransaction(CScript scriptPubKey, int64 nValue,
+		CWalletTx& wtxNew, CReserveKey& reservekey, int64& nFeeRet, std::string& strFailReason, const CCoinControl *coinControl = NULL);
+
+
+	//L
+	bool CreateTransaction(const std::vector<std::pair<CScript, int64_t> >& vecSend, CWalletTx& wtxNew, CReserveKey& reservekey, int64_t& nFeeRet, 
+		int32_t& nChangePos, std::string& strFailReason, const CCoinControl *coinControl = NULL, AvailableCoinsType coin_type = ALL_COINS, bool useIX = false);
+	
+	bool CreateTransaction(CScript scriptPubKey, int64_t nValue, std::string& sNarr, CWalletTx& wtxNew, CReserveKey& reservekey, int64_t& nFeeRet, 
+		const CCoinControl *coinControl = NULL);
+
+
+
+
+	bool CommitTransaction(CWalletTx& wtxNew, CReserveKey& reservekey);
+
+    //std::string SendMoney(CScript scriptPubKey, int64 nValue, CWalletTx& wtxNew, bool fAskFee=false);
+
+	std::string SendMoney(CScript scriptPubKey, CAmount nValue, CWalletTx& wtxNew, bool fAskFee=false);
+
+
     std::string SendMoneyToDestination(const CTxDestination &address, int64 nValue, CWalletTx& wtxNew, bool fAskFee=false);
 
     bool NewKeyPool();
@@ -199,8 +252,31 @@ public:
     int64 GetOldestKeyPoolTime();
     void GetAllReserveKeys(std::set<CKeyID>& setAddress);
 
+	std::string PrepareDarksendDenominate(int minRounds, int maxRounds);
+	bool ConvertList(std::vector<CTxIn> vCoins, std::vector<int64_t>& vecAmounts);
+	bool CreateCollateralTransaction(CTransaction& txCollateral, std::string strReason);
+
+
     std::set< std::set<CTxDestination> > GetAddressGroupings();
     std::map<CTxDestination, int64> GetAddressBalances();
+
+	bool IsDenominated(const CTxIn &txin) const;
+
+	bool IsDenominated(const CTransaction& tx) const
+	{
+		/*
+		Return false if ANY inputs are non-denom
+		*/
+		bool ret = true;
+		BOOST_FOREACH(const CTxIn& txin, tx.vin)
+		{
+			if (!IsDenominated(txin)) {
+				ret = false;
+			}
+		}
+		return ret;
+	}
+	bool IsDenominatedAmount(int64_t nInputAmount) const;
 
     bool IsMine(const CTxIn& txin) const;
     int64 GetDebit(const CTxIn& txin) const;
@@ -208,6 +284,7 @@ public:
     {
         return ::IsMine(*this, txout.scriptPubKey);
     }
+
     int64 GetCredit(const CTxOut& txout) const
     {
         if (!MoneyRange(txout.nValue))
@@ -639,6 +716,57 @@ public:
         return (GetDebit() > 0);
     }
 
+	bool IsTrusted() const
+	{
+		// Quick answer in most cases
+		if (!IsFinalTx(*this))
+			return false;
+		int nDepth = GetDepthInMainChain();
+		if (nDepth >= 1)
+			return true;
+		if (nDepth < 0)
+			return false;
+		if (fConfChange || !IsFromMe()) // using wtx's cached debit
+			return false;
+
+		// If no confirmations but it's from us, we can still
+		// consider it confirmed if all dependencies are confirmed
+		std::map<uint256, const CMerkleTx*> mapPrev;
+		std::vector<const CMerkleTx*> vWorkQueue;
+		vWorkQueue.reserve(vtxPrev.size() + 1);
+		vWorkQueue.push_back(this);
+		for (unsigned int i = 0; i < vWorkQueue.size(); i++)
+		{
+			const CMerkleTx* ptx = vWorkQueue[i];
+
+			if (!IsFinalTx(*ptx))
+				return false;
+			int nPDepth = ptx->GetDepthInMainChain();
+			if (nPDepth >= 1)
+				continue;
+			if (nPDepth < 0)
+				return false;
+			if (!pwallet->IsFromMe(*ptx))
+				return false;
+
+			if (mapPrev.empty())
+			{
+				BOOST_FOREACH(const CMerkleTx& tx, vtxPrev)
+					mapPrev[tx.GetHash()] = &tx;
+			}
+
+			BOOST_FOREACH(const CTxIn& txin, ptx->vin)
+			{
+				if (!mapPrev.count(txin.prevout.hash))
+					return false;
+				vWorkQueue.push_back(mapPrev[txin.prevout.hash]);
+			}
+		}
+
+		return true;
+	}
+
+
     bool IsConfirmed() const
     {
         // Quick answer in most cases
@@ -707,6 +835,13 @@ public:
     const CWalletTx *tx;
     int i;
     int nDepth;
+	bool fSpendable;
+
+
+	COutput(const CWalletTx *txIn, int iIn, int nDepthIn, bool fSpendableIn)
+	{
+		tx = txIn; i = iIn; nDepth = nDepthIn; fSpendable = fSpendableIn;
+	}
 
     COutput(const CWalletTx *txIn, int iIn, int nDepthIn)
     {
@@ -722,6 +857,23 @@ public:
     {
         printf("%s\n", ToString().c_str());
     }
+
+	//Used with Darksend. Will return fees, then denominations, everything else, then very small inputs that aren't fees
+	int Priority() const
+	{
+		if (tx->vout[i].nValue == DARKSEND_FEE) return -20000;
+		BOOST_FOREACH(int64_t d, darkSendDenominations)
+			if (tx->vout[i].nValue == d) return 10000;
+		if (tx->vout[i].nValue < 1 * COIN) return 20000;
+
+		//nondenom return largest first
+		return -(tx->vout[i].nValue / COIN);
+	}
+
+	/*void print() const
+	{
+		printf("%s\n", ToString().c_str());
+	}*/
 };
 
 

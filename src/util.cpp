@@ -17,6 +17,12 @@
 #include "sync.h"
 #include "version.h"
 #include "ui_interface.h"
+#include "uint256.h"
+
+#include <algorithm>
+
+#include <boost/date_time/posix_time/posix_time.hpp>
+
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
 #include <boost/algorithm/string/predicate.hpp> // for startswith() and endswith()
@@ -39,6 +45,7 @@ namespace boost {
 #include <boost/thread.hpp>
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
+#include <openssl/err.h>
 #include <stdarg.h>
 
 #ifdef WIN32
@@ -68,6 +75,22 @@ namespace boost {
 
 using namespace std;
 
+//Dark  features
+bool fMasterNode = false;
+string strMasterNodePrivKey = "";
+string strMasterNodeAddr = "";
+bool fLiteMode = false;
+int nInstantXDepth = 1;
+int nDarksendRounds = 2;
+int nAnonymizeScoreAmount = 500;
+int nLiquidityProvider = 0;
+/** Spork enforcement enabled time */
+int64_t enforceMasternodePaymentsTime = 4085657524;
+bool fSucessfullyLoaded = false;
+bool fEnableDarksend = false;
+/** All denominations used by darksend */
+std::vector<int64_t> darkSendDenominations;
+
 map<string, string> mapArgs;
 map<string, vector<string> > mapMultiArgs;
 bool fDebug = false;
@@ -82,9 +105,10 @@ bool fTestNet = false;
 bool fBloomFilters = true;
 bool fNoListen = false;
 bool fLogTimestamps = false;
-CMedianFilter<int64> vTimeOffsets(200,0);
+CMedianFilter<int64> vTimeOffsets(200, 0);
 volatile bool fReopenDebugLog = false;
-bool fCachedPath[2] = {false, false};
+bool fCachedPath[2] = { false, false };
+
 
 // Init OpenSSL library multithreading support
 static CCriticalSection** ppmutexOpenSSL;
@@ -200,7 +224,13 @@ uint256 GetRandHash()
 }
 
 
-
+void GetRandBytes(unsigned char* buf, int num)
+{
+	if (RAND_bytes(buf, num) != 1) {
+		printf("%s: OpenSSL RAND_bytes() failed with error: %s\n", __func__, ERR_error_string(ERR_get_error(), NULL));
+		assert(false);
+	}
+}
 
 
 
@@ -623,6 +653,63 @@ bool SoftSetBoolArg(const std::string& strArg, bool fValue)
     else
         return SoftSetArg(strArg, std::string("0"));
 }
+
+// Base64 encoding with secure memory allocation
+SecureString EncodeBase64Secure(const SecureString& input)
+{
+	// Init openssl BIO with base64 filter and memory output
+	BIO *b64, *mem;
+	b64 = BIO_new(BIO_f_base64());
+	BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL); // No newlines in output
+	mem = BIO_new(BIO_s_mem());
+	BIO_push(b64, mem);
+
+	// Decode the string
+	BIO_write(b64, &input[0], input.size());
+	(void)BIO_flush(b64);
+
+	// Create output variable from buffer mem ptr
+	BUF_MEM *bptr;
+	BIO_get_mem_ptr(b64, &bptr);
+	SecureString output(bptr->data, bptr->length);
+
+	// Cleanse secure data buffer from memory
+	OPENSSL_cleanse((void *)bptr->data, bptr->length);
+
+	// Free memory
+	BIO_free_all(b64);
+	return output;
+}
+
+// Base64 decoding with secure memory allocation
+SecureString DecodeBase64Secure(const SecureString& input)
+{
+	SecureString output;
+
+	// Init openssl BIO with base64 filter and memory input
+	BIO *b64, *mem;
+	b64 = BIO_new(BIO_f_base64());
+	BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL); //Do not use newlines to flush buffer
+	mem = BIO_new_mem_buf((void *)&input[0], input.size());
+	BIO_push(b64, mem);
+
+	// Prepare buffer to receive decoded data
+	if (input.size() % 4 != 0) {
+		throw runtime_error("Input length should be a multiple of 4");
+	}
+	size_t nMaxLen = input.size() / 4 * 3; // upper bound, guaranteed divisible by 4
+	output.resize(nMaxLen);
+
+	// Decode the string
+	size_t nLen;
+	nLen = BIO_read(b64, (void *)&output[0], input.size());
+	output.resize(nLen);
+
+	// Free memory
+	BIO_free_all(b64);
+	return output;
+}
+
 
 
 string EncodeBase64(const unsigned char* pch, size_t len)
@@ -1096,6 +1183,13 @@ boost::filesystem::path GetConfigFile()
     boost::filesystem::path pathConfigFile(GetArg("-conf", "scorecoin.conf"));
     if (!pathConfigFile.is_complete()) pathConfigFile = GetDataDir(false) / pathConfigFile;
     return pathConfigFile;
+}
+
+boost::filesystem::path GetMasternodeConfigFile()
+{
+	boost::filesystem::path pathConfigFile(GetArg("-mnconf", "masternode.conf"));
+	if (!pathConfigFile.is_complete()) pathConfigFile = GetDataDir(false) / pathConfigFile;
+	return pathConfigFile;
 }
 
 void ReadConfigFile(map<string, string>& mapSettingsRet,

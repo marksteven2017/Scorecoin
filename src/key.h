@@ -251,6 +251,12 @@ public:
     //                  0x1D = second key with even y, 0x1E = second key with odd y,
     //                  add 0x04 for compressed keys.
     bool SignCompact(const uint256 &hash, std::vector<unsigned char>& vchSig) const;
+
+	static bool CheckSignatureElement(const unsigned char *vch, int len, bool half);
+
+	// Ensure that signature is DER-encoded
+	static bool ReserealizeSignature(std::vector<unsigned char>& vchSig);
+
 };
 
 #endif

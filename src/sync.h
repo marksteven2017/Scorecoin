@@ -46,7 +46,10 @@ void LeaveCritical();
 #else
 void static inline EnterCritical(const char* pszName, const char* pszFile, int nLine, void* cs, bool fTry = false) {}
 void static inline LeaveCritical() {}
+void static inline AssertLockHeldInternal(const char* pszName, const char* pszFile, int nLine, void *cs) {}
+
 #endif
+#define AssertLockHeld(cs) AssertLockHeldInternal(#cs, __FILE__, __LINE__, &cs)
 
 #ifdef DEBUG_LOCKCONTENTION
 void PrintLockContention(const char* pszName, const char* pszFile, int nLine);

@@ -20,12 +20,20 @@
 #include <vector>
 #include <string>
 
+
 #include <boost/version.hpp>
 #include <boost/thread.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/date_time/gregorian/gregorian_types.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
+
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/buffer.h>
+#include <openssl/crypto.h> // for OPENSSL_cleanse()
+#include <openssl/rand.h>
+#include <openssl/bn.h>
 
 #include "netbase.h" // for AddTimeData
 
@@ -34,6 +42,7 @@ typedef unsigned long long  uint64;
 
 static const int64 COIN = 100000000;
 static const int64 CENT = 1000000;
+typedef int64_t CAmount;
 
 #define loop                for (;;)
 #define BEGIN(a)            ((char*)&(a))
@@ -91,6 +100,8 @@ T* alignup(T* p)
     return u.ptr;
 }
 
+boost::filesystem::path GetMasternodeConfigFile();
+
 #ifdef WIN32
 #define MSG_NOSIGNAL        0
 #define MSG_DONTWAIT        0
@@ -131,6 +142,19 @@ inline void MilliSleep(int64 n)
 
 
 
+
+extern bool fMasterNode;
+extern bool fLiteMode;
+extern int nInstantXDepth;
+extern int nDarksendRounds;
+extern int nAnonymizeScoreAmount;
+extern int nLiquidityProvider;
+extern bool fEnableDarksend;
+extern int64_t enforceMasternodePaymentsTime;
+extern std::string strMasterNodeAddr;
+extern int keysLoaded;
+extern bool fSucessfullyLoaded;
+extern std::vector<int64_t> darkSendDenominations;
 
 
 extern std::map<std::string, std::string> mapArgs;
@@ -194,6 +218,10 @@ std::vector<unsigned char> DecodeBase64(const char* p, bool* pfInvalid = NULL);
 std::string DecodeBase64(const std::string& str);
 std::string EncodeBase64(const unsigned char* pch, size_t len);
 std::string EncodeBase64(const std::string& str);
+
+SecureString DecodeBase64Secure(const SecureString& input);
+SecureString EncodeBase64Secure(const SecureString& input);
+
 std::vector<unsigned char> DecodeBase32(const char* p, bool* pfInvalid = NULL);
 std::string DecodeBase32(const std::string& str);
 std::string EncodeBase32(const unsigned char* pch, size_t len);
@@ -220,6 +248,7 @@ boost::filesystem::path GetSpecialFolderPath(int nFolder, bool fCreate = true);
 #endif
 boost::filesystem::path GetTempPath();
 void ShrinkDebugFile();
+void GetRandBytes(unsigned char* buf, int num);
 int GetRandInt(int nMax);
 uint64 GetRand(uint64 nMax);
 uint256 GetRandHash();

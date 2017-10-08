@@ -9,6 +9,10 @@
 
 extern CWallet* pwalletMain;
 
+namespace boost {
+	class thread_group;
+} // namespace boost
+
 void StartShutdown();
 bool ShutdownRequested();
 void Shutdown();

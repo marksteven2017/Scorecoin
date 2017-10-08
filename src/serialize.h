@@ -38,19 +38,62 @@ inline T& REF(const T& val)
     return const_cast<T&>(val);
 }
 
+/**
+* Used to acquire a non-const pointer "this" to generate bodies
+* of const serialization operations from a template
+*/
+template<typename T>
+inline T* NCONST_PTR(const T* val)
+{
+	return const_cast<T*>(val);
+}
+
+
+/**
+* Get begin pointer of vector (non-const version).
+* @note These functions avoid the undefined case of indexing into an empty
+* vector, as well as that of indexing after the end of the vector.
+*/
+template <class T, class TAl>
+inline T* begin_ptr(std::vector<T, TAl>& v)
+{
+	return v.empty() ? NULL : &v[0];
+}
+/** Get begin pointer of vector (const version) */
+template <class T, class TAl>
+inline const T* begin_ptr(const std::vector<T, TAl>& v)
+{
+	return v.empty() ? NULL : &v[0];
+}
+/** Get end pointer of vector (non-const version) */
+template <class T, class TAl>
+inline T* end_ptr(std::vector<T, TAl>& v)
+{
+	return v.empty() ? NULL : (&v[0] + v.size());
+}
+
 /////////////////////////////////////////////////////////////////
 //
 // Templates for serializing to anything that looks like a stream,
 // i.e. anything that supports .read(char*, int) and .write(char*, int)
 //
 
-enum
-{
-    // primary actions
-    SER_NETWORK         = (1 << 0),
-    SER_DISK            = (1 << 1),
-    SER_GETHASH         = (1 << 2),
-};
+
+#define ADD_SERIALIZE_METHODS                                                          \
+    size_t GetSerializeSize(int nType, int nVersion) const {                         \
+        CSizeComputer s(nType, nVersion);                                            \
+        NCONST_PTR(this)->SerializationOp(s, CSerActionSerialize(), nType, nVersion);\
+        return s.size();                                                             \
+    }                                                                                \
+    template<typename Stream>                                                        \
+    void Serialize(Stream& s, int nType, int nVersion) const {                       \
+        NCONST_PTR(this)->SerializationOp(s, CSerActionSerialize(), nType, nVersion);\
+    }                                                                                \
+    template<typename Stream>                                                        \
+    void Unserialize(Stream& s, int nType, int nVersion) {                           \
+        SerializationOp(s, CSerActionUnserialize(), nType, nVersion);                \
+    }
+
 
 #define IMPLEMENT_SERIALIZE(statements)    \
     unsigned int GetSerializeSize(int nType, int nVersion) const  \
@@ -233,6 +276,14 @@ uint64 ReadCompactSize(Stream& is)
         throw std::ios_base::failure("ReadCompactSize() : size too large");
     return nSizeRet;
 }
+
+enum
+{
+	// primary actions
+	SER_NETWORK = (1 << 0),
+	SER_DISK = (1 << 1),
+	SER_GETHASH = (1 << 2),
+};
 
 // Variable-length integers: bytes are a MSB base-128 encoding of the number.
 // The high bit in each byte signifies whether another digit follows. To make
@@ -790,7 +841,34 @@ struct ser_streamplaceholder
 
 
 typedef std::vector<char, zero_after_free_allocator<char> > CSerializeData;
+class CSizeComputer
+{
+protected:
+	size_t nSize;
 
+public:
+	int nType;
+	int nVersion;
+
+	CSizeComputer(int nTypeIn, int nVersionIn) : nSize(0), nType(nTypeIn), nVersion(nVersionIn) {}
+
+	CSizeComputer& write(const char *psz, size_t nSize)
+	{
+		this->nSize += nSize;
+		return *this;
+	}
+
+	template<typename T>
+	CSizeComputer& operator<<(const T& obj)
+	{
+		::Serialize(*this, obj, nType, nVersion);
+		return (*this);
+	}
+
+	size_t size() const {
+		return nSize;
+	}
+};
 /** Double ended buffer combining vector and stream-like interfaces.
  *
  * >> and << read and write unformatted data using the above serialization templates.

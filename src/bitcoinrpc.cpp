@@ -10,19 +10,23 @@
 #include "base58.h"
 #include "bitcoinrpc.h"
 #include "db.h"
+#include "wallet.h"
 
+#include <boost/algorithm/string.hpp>
 #include <boost/asio.hpp>
 #include <boost/asio/ip/v6_only.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/bind.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/filesystem/fstream.hpp>
 #include <boost/foreach.hpp>
 #include <boost/iostreams/concepts.hpp>
 #include <boost/iostreams/stream.hpp>
-#include <boost/algorithm/string.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/asio/ssl.hpp>
-#include <boost/filesystem/fstream.hpp>
 #include <boost/shared_ptr.hpp>
+#include <boost/lexical_cast.hpp>
+
+
+
 #include <list>
 
 using namespace std;
@@ -34,6 +38,7 @@ static std::string strRPCUserColonPass;
 
 // These are created by StartRPCThreads, destroyed in StopRPCThreads
 static asio::io_service* rpc_io_service = NULL;
+static map<string, boost::shared_ptr<deadline_timer> > deadlineTimers;
 static ssl::context* rpc_ssl_context = NULL;
 static boost::thread_group* rpc_worker_group = NULL;
 
@@ -266,6 +271,10 @@ static const CRPCCommand vRPCCommands[] =
     { "lockunspent",            &lockunspent,            false,     false,      true },
     { "listlockunspent",        &listlockunspent,        false,     false,      true },
     { "verifychain",            &verifychain,            true,      false,      false },
+	{ "darksend",               &darksend,               false,     false,      true },
+//	{ "spork",                  &spork,                  true,      false,      false },
+	{ "masternode",             &masternode,             true,      false,      true },
+	{ "keepass",                &keepass,                false,     false,      true },
 };
 
 CRPCTable::CRPCTable()
@@ -475,6 +484,39 @@ int ReadHTTPMessage(std::basic_istream<char>& stream, map<string,
     }
 
     return HTTP_OK;
+}
+
+int ReadHTTPMessage(std::basic_istream<char>& stream, map<string,
+	string>& mapHeadersRet, string& strMessageRet,
+	int nProto, size_t max_size)
+{
+	mapHeadersRet.clear();
+	strMessageRet = "";
+
+	// Read header
+	int nLen = ReadHTTPHeaders(stream, mapHeadersRet);
+	if (nLen < 0 || (size_t)nLen > max_size)
+		return HTTP_INTERNAL_SERVER_ERROR;
+
+	// Read message
+	if (nLen > 0)
+	{
+		vector<char> vch(nLen);
+		stream.read(&vch[0], nLen);
+		strMessageRet = string(vch.begin(), vch.end());
+	}
+
+	string sConHdr = mapHeadersRet["connection"];
+
+	if ((sConHdr != "close") && (sConHdr != "keep-alive"))
+	{
+		if (nProto >= 1)
+			mapHeadersRet["connection"] = "keep-alive";
+		else
+			mapHeadersRet["connection"] = "close";
+	}
+
+	return HTTP_OK;
 }
 
 bool HTTPAuthorized(map<string, string>& mapHeaders)
@@ -851,7 +893,7 @@ void StartRPCThreads()
 void StopRPCThreads()
 {
     if (rpc_io_service == NULL) return;
-
+	deadlineTimers.clear();
     rpc_io_service->stop();
     if (rpc_worker_group != NULL)
         rpc_worker_group->join_all();
