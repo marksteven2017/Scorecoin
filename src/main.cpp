@@ -47,7 +47,7 @@ set<pair<COutPoint, unsigned int> > setStakeSeen;
 
 CBigNum bnProofOfStakeLimit(~uint256(0) >> 20);
 
-unsigned int nStakeMinAge = 8 * 60 * 60; 
+unsigned int nStakeMinAge = 60 * 60; 
 unsigned int nModifierInterval = 8 * 60; 
 
 int nCoinbaseMaturity = 20;
@@ -2535,18 +2535,6 @@ bool CBlock::CheckBlock(bool fCheckPOW, bool fCheckMerkleRoot, bool fCheckSig) c
                         if(vtx[1].vout[i].nValue == masternodePaymentAmount && vtx[1].vout[i].scriptPubKey == payee)
                             foundPaymentAndPayee = true;
                     }
-
-
-                    if (pindex->nHeight > 2) {
-                        int64_t blockValue = vtx[1].vout[1].nValue;
-                        int64_t nCredit = blockValue / 0.9;
-                        int64_t devFee = nCredit * 0.1 - 0.5;
-                        CScorecoinAddress devRewardAddress(getDevAddress(pindex->nHeight + 1));
-                        CScript devRewardscriptPubKey = GetScriptForDestination(devRewardAddress.Get());
-                        CTxOut lastBlockTx = vtx[1].vout[vtx[1].vout.size() - 1];
-                        if(lastBlockTx.nValue < devFee || lastBlockTx.scriptPubKey != devRewardscriptPubKey)
-                            foundDevFee = false;
-                    } 
 
                     CTxDestination address1;
                     ExtractDestination(payee, address1);
